@@ -1,27 +1,35 @@
-# Diffusion From Scratch (CIFAR-10) — DDPM baseline → iterative modern upgrades
 
-A small, readable diffusion repo that starts with a **vanilla DDPM-style ε-prediction model** and gradually moves toward more modern diffusion systems (score-based modeling, improved samplers, stability tricks, and eventually Stable-Diffusion-like components) **in small additive increments with minimal architectural disruption**.
 
-This repo currently trains a **U-Net with timestep embeddings + selective attention** on **CIFAR-10 (32×32)** and performs ancestral sampling from pure noise. Core files include:
+# Diffusion to Consistency
 
-* CIFAR-10 dataloader with normalization to **[-1, 1]** 
-* Forward diffusion + training step + ancestral sampling loop 
-* U-Net backbone with ResBlocks, GroupNorm, attention at chosen resolutions, and timestep embeddings 
-* Training script, checkpointing, and a basic loss curve plot 
-* Sinusoidal timestep embedding utility 
+### DDPM baseline -> iterative modern upgrades -> Consistency Models (Maybe)
+
+A small, readable diffusion repository that starts with a **vanilla DDPM-style ε-prediction model** and gradually moves toward more modern diffusion systems (score-based modeling, improved samplers, stability tricks, and eventually Stable-Diffusion-like components) **in small additive increments with minimal architectural disruption**.
+
+This repo currently trains a **U-Net with timestep embeddings and selective self-attention** on **CIFAR-10 (32×32)** and performs ancestral sampling from pure Gaussian noise.
+
+![Forward diffusion](images/forward_noising.png)
+
+Core components include:
+
+* CIFAR-10 dataloader with normalization to **[-1, 1]**
+* Forward diffusion, training step, and ancestral sampling loop
+* U-Net backbone with ResBlocks, GroupNorm, timestep embeddings, and attention
+* Training script with checkpointing and loss visualization
+* Sinusoidal timestep embedding utilities
 
 ---
 
 ## Why this repo exists
 
-Most diffusion repos jump straight into big frameworks, large abstractions, or latent diffusion pipelines. This one is the opposite:
+Most diffusion repositories jump directly into large frameworks, heavy abstractions, or latent diffusion pipelines. This repo is intentionally different:
 
-* **Start minimal** (DDPM baseline).
-* **Instrument heavily** (metrics + plots + sample grids).
-* **Add improvements iteratively** (each PR = one concept).
-* **Avoid architectural churn** (keep the U-Net interface stable as long as possible).
+* **Start minimal** (DDPM baseline)
+* **Instrument heavily** (plots, sample grids, trajectories)
+* **Add improvements iteratively** (one concept per PR)
+* **Avoid architectural churn** (keep the U-Net interface stable)
 
-If you want a “from scratch but not toy” stepping stone toward modern diffusion, this is it.
+If you want a *from-scratch but not toy* stepping stone toward modern diffusion systems, this repo is designed for that purpose.
 
 ---
 
@@ -29,61 +37,113 @@ If you want a “from scratch but not toy” stepping stone toward modern diffus
 
 ### Data
 
-* CIFAR-10 training loader with:
+* CIFAR-10 training set
+* Random horizontal flip
+* `ToTensor()` followed by `Normalize((0.5,…),(0.5,…))` → **[-1, 1]**
 
-  * random horizontal flip
-  * `ToTensor()` then `Normalize((0.5,…),(0.5,…))` → **[-1,1]** 
+---
 
-### Diffusion process
+### Diffusion Process
 
-* Linear beta schedule from `1e-4` to `0.02` over `T=1000` 
-* Precomputed:
+* Linear beta schedule from `1e-4` to `0.02`
+* Total timesteps: `T = 1000`
+* Precomputed quantities:
 
-  * `alpha_t = 1 - beta_t`
-  * `alpha_bar_t = ∏ alpha_t` 
-* Training:
+  * `α_t = 1 − β_t`
+  * `\bar{α}_t = ∏ α_t`
 
-  * sample `t ~ Uniform({0..T-1})`
-  * generate `x_t = sqrt(ᾱ_t)x_0 + sqrt(1-ᾱ_t) ε`
-  * predict ε with U-Net and use MSE loss 
+Training procedure:
+
+* Sample `t ~ Uniform({0 … T−1})`
+* Generate
+  [
+  x_t = \sqrt{\bar{\alpha}_t} x_0 + \sqrt{1 - \bar{\alpha}_t}\epsilon
+  ]
+* Predict ε with the U-Net
+* Optimize mean-squared error loss
+
+---
+
+### Forward Diffusion Behavior
+
+The figure below visualizes the forward diffusion process applied to the same CIFAR-10 images at increasing timesteps. As expected, structure is gradually destroyed as noise variance increases.
+
+![Forward diffusion behavior](images/forward_noising.png)
+
+---
 
 ### Model: U-Net
 
-* ResBlocks use:
+* Encoder–decoder U-Net operating directly in pixel space
+* ResBlocks consist of:
 
   * GroupNorm → SiLU → Conv
   * timestep embedding projection added to hidden activations
-  * dropout + second conv with **zero-init** (residual block starts near identity) 
-* Attention blocks (single-head) at selected resolutions (`attn_res`) 
-* Timestep embeddings: sinusoidal + 2-layer MLP
+  * dropout + second conv with **zero initialization**
+* Selective single-head self-attention at chosen resolutions (`attn_res`)
+* Sinusoidal timestep embeddings followed by a 2-layer MLP
+* Residual connections throughout (ResBlocks and Attention blocks)
+
+The model interface is intentionally kept simple:
+
+```
+model(x_t, t) → ε̂
+```
+
+This allows objective and sampler upgrades without redesigning the backbone.
+
+---
 
 ### Sampling
 
-* Ancestral reverse diffusion:
+Sampling follows standard ancestral DDPM reverse diffusion:
 
-  * `x_T ~ N(0,I)`
-  * loop `t = T-1 … 0`
-  * compute DDPM mean from ε-pred and add noise except at `t=0` 
+* Initialize `x_T ~ N(0, I)`
+* Iterate `t = T−1 … 0`
+* Compute DDPM posterior mean from ε-prediction
+* Add noise at all steps except `t = 0`
+
+---
+
+### Generated Samples
+
+Below are samples generated via ancestral DDPM sampling from pure noise using the current baseline configuration.
+
+#### warm-up training (~5k steps)
+
+![Samples at 5k steps](images/samples_step_5k.png)
+
+---
+
+### Training Dynamics
+
+![Training loss curve](images/loss_curve.png)
+
+The training loss decreases steadily, indicating stable ε-prediction optimization under the linear noise schedule.
+
+If available, loss can also be analyzed by timestep bucket to assess whether learning is balanced across the diffusion horizon.
 
 ---
 
 ## Repository Structure
 
-* `datasetLoaders.py` — CIFAR-10 dataloader + preprocessing 
-* `diffusion.py` — schedules, forward diffusion, train step, sampling 
-* `models.py` — U-Net + ResBlock + Attention + Up/Down blocks 
-* `utils.py` — sinusoidal timestep embeddings 
-* `scripts.py` — training entry point, checkpointing, basic loss plotting 
+* `datasetLoaders.py` — CIFAR-10 dataloader and preprocessing
+* `diffusion.py` — schedules, forward diffusion, training step, samplers
+* `models.py` — U-Net, ResBlocks, attention, up/downsampling blocks
+* `utils.py` — timestep embeddings, sample saving, visualization helpers
+* `scripts.py` — training entry point, checkpointing, loss plotting
 
 ---
 
 ## Quickstart
 
-### 1) Install
+### 1) Install dependencies
 
 ```bash
 pip install torch torchvision einops tqdm matplotlib
 ```
+
+---
 
 ### 2) Train
 
@@ -91,21 +151,14 @@ pip install torch torchvision einops tqdm matplotlib
 python scripts.py
 ```
 
-What happens:
+This will:
 
-* downloads CIFAR-10 into `./data` 
-* trains for `NUM_TRAIN_STEPS` (currently set to 1000) 
-* saves checkpoints into `saves/<exp_no>/` every `save_interval` steps 
-* writes a loss curve plot `<exp_no>_loss_curve.png` 
-
-### 3) Resume training (planned)
-
-Not wired yet (but checkpoints already contain `step`, `model`, `optimizer`, and `losses`). 
-A small upcoming improvement will add a `load_checkpoint()` helper and resume logic.
+* download CIFAR-10 into `./data`
+* train for `NUM_TRAIN_STEPS` (default: 1000)
+* save checkpoints to `saves/<exp_no>/`
+* write a training loss plot `<exp_no>_loss_curve.png`
 
 ---
-
-## Outputs and Artifacts
 
 ### Checkpoints
 
@@ -115,129 +168,86 @@ Saved at:
 saves/<exp_no>/<step>_checkpoint.pt
 ```
 
-Contains:
+Each checkpoint contains:
 
 * `step`
-* `model` state_dict
-* `optimizer` state_dict
-* `losses` list 
-
-### Plots
-
-* Training loss curve saved as `<exp_no>_loss_curve.png` 
+* model `state_dict`
+* optimizer `state_dict`
+* loss history
 
 ---
 
-## Metrics & Graphs Roadmap (what will be displayed)
+## Iterative Upgrade Path
 
+The guiding principle is to keep `model(x_t, t)` stable and make most upgrades modular.
 
-### Training-time metrics
+### Phase 1: DDPM baseline hardening
 
-* **Loss vs step** 
-* **EMA-smoothed loss**
-* **Grad norm** 
-* **Parameter norm / weight statistics**
-* **Learning rate**
-* **Noise-pred error by timestep bucket**
-  e.g. average MSE at t∈[0..99], [100..199], … helps detect whether the model only learns early timesteps
+* Exponential moving average (EMA) of model weights
+* Improved logging (CSV / JSON)
+* Deterministic seeding and reproducibility
+* Periodic sample grids during training
 
-### Sampling-time metrics
+### Phase 2: Objective variants
 
-* **Sample grid every N steps**
-* **Diversity metrics** (simple: pixel variance across batch)
-* **FID/KID** (optional; more work, but common)
-* **Inference speed** (ms per sample) & memory stats
-* **Trajectory snapshots** (store `x_t` at a few t values to visualize denoising dynamics)
+* v-prediction (Stable Diffusion style)
+* x₀-prediction
+* SNR-weighted losses
 
-### Graphs
+All introduced without redesigning the U-Net.
 
-Planned figures:
+### Phase 3: Score-based modeling
 
-* `loss_curve.png`
-* `loss_by_timestep_bucket.png`
-* `sample_grid_step_<k>.png`
-* `denoise_trajectory.png` (show x_T → x_0 at selected t’s)
+* Interpret outputs as score estimates
+* Introduce continuous-time (VE / VP SDE) formulations incrementally
 
----
+### Phase 4: Better samplers
 
-## Iterative Upgrade Path (minimal architectural changes)
+* DDIM
+* Predictor–corrector methods
+* DPM-Solver-style samplers
 
-The philosophy: keep `model(x_t, t)` stable as long as possible, and make diffusion upgrades mostly in `diffusion.py` / sampling utilities. 
+### Phase 5: Toward Stable Diffusion
 
-### Phase 1: DDPM baseline hardening (small PRs)
-
-1. **EMA of model weights** (often improves sample quality a lot)
-2. **Better logging** (CSV/JSON + plots)
-3. **Deterministic seeding** + reproducible runs
-4. **Sample grids during training** (qualitative feedback loop)
-
-### Phase 2: Objective variants (no U-Net redesign)
-
-1. **v-prediction** (stable-diffusion style training target)
-2. **x0-prediction** (predict x0 directly; similar interface)
-3. **SNR weighting / loss reweighting**
-   All of these can be introduced while preserving the same U-Net structure and only changing targets in `diffusionTrainStep`. 
-
-### Phase 3: Score-based modeling (additive)
-
-* Interpret outputs as **score** ∇x log p(x_t) or map from ε-pred to score depending on parameterization.
-* Introduce continuous-time formulations incrementally (VE/VP SDE style), keeping U-Net mostly the same but changing time embedding scaling and sampler logic.
-
-### Phase 4: Better samplers (mostly sampling code)
-
-* DDIM sampling (fast, deterministic option)
-* Predictor-corrector (Langevin steps)
-* DPM-Solver-ish upgrades (later; more math but still modular)
-
-All of this lives mostly next to `sample()` in `diffusion.py`. 
-
-### Phase 5: “Stable diffusion direction” without big rewrites
-
-We’ll do this carefully:
-
-* keep U-Net API stable
-* add features behind flags:
-
-  * classifier-free guidance (CFG)
-  * conditioning pathways (start with simple class conditioning for CIFAR-10, then text later)
-  * eventually: latent diffusion (requires an autoencoder, but can still be isolated as a new module)
+* Classifier-free guidance
+* Conditioning pathways (class → later text)
+* Latent diffusion via an auxiliary autoencoder
 
 ---
 
 ## Contributing / Collaboration
 
-If you want to collaborate, you’re very welcome.
+Contributions are welcome.
 
-### What I’m looking for
+### What fits well
 
-* People who enjoy **clean incremental engineering** (one concept per PR).
-* Folks comfortable with diffusion math OR willing to learn while implementing.
+* Small, focused PRs (one concept at a time)
+* Clear validation plots or metrics
+* Minimal changes to `models.py` unless necessary
 
-### Suggested first contributions (good starter PRs)
+### Good starter contributions
 
-* Add **sample grid** saving during training (every `save_interval`)
-* Add **EMA weights** + sample with EMA model
-* Add a basic **metrics logger** (CSV + matplotlib plots)
-* Add **DDIM sampler** option
-* Add **resume-from-checkpoint** support
+* EMA weights + EMA sampling
+* Sample grid saving during training
+* Resume-from-checkpoint support
+* DDIM sampler
+* Metrics logging utilities
 
-### How to collaborate
-
-* Open an issue describing what you want to add and the smallest test/validation you’ll include.
-* Keep PRs small and self-contained (one feature, one plot/test).
-* Prefer minimal changes to `models.py` unless the feature truly needs it. 
+Open an issue first if you’re unsure — happy to discuss direction.
 
 ---
 
-## Notes / Known limitations (current state)
+## Notes
 
-* Training steps are very low by default (`NUM_TRAIN_STEPS=1000`), so don’t expect great samples yet. 
-* No EMA, no DDIM, no periodic sample saving (yet).
-* No formal evaluation (FID/KID not integrated).
+* Default training runs are intentionally short; do not expect high-quality samples yet.
+* No EMA or DDIM enabled by default.
+* FID/KID not yet integrated.
 
 ---
 
-## Citation / Inspiration
+## Acknowledgements
 
-Baseline design choices reflect common DDPM/U-Net best practices: timestep embeddings, ResBlocks, GroupNorm, selective attention at lower resolutions, and ancestral sampling.
+Design choices follow common DDPM and U-Net best practices: timestep embeddings, residual blocks with GroupNorm, selective attention, and ancestral sampling.
+
+The goal is not novelty, but **clarity, correctness, and extensibility**.
 

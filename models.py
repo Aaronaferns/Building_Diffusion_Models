@@ -4,7 +4,6 @@ import torch.nn.functional as F
 from utils import *
 from einops import einsum
 
-
 '''
 Def a Unet model
     Def Downsample
@@ -25,12 +24,14 @@ Def a Unet model
         Conditioning: TimeStep embeddings
 '''
 
-
-
-
-#MidBLock
-#OutputBlock
-
+def nonlinearity():
+    return nn.SiLU()
+    
+def group_norm(C, max_groups=32, eps=1e-5):
+    for g in (32, 16, 8, 4, 2, 1):
+        if g <= max_groups and C % g == 0:
+            return nn.GroupNorm(g, C, eps=eps, affine=True)
+    return nn.GroupNorm(1, C, eps=eps, affine=True) 
 
 #ResBlock
 '''
@@ -40,17 +41,6 @@ x ──┬──► GN → SiLU → Conv → (+temb) → GN → SiLU → Dropou
     └──► (identity OR 1×1/3×3 projection if needed) ───────────────┘
                                add → output
 '''
-
-def nonlinearnity():
-    return nn.SiLU()
-    
-def group_norm(C, max_groups=32, eps=1e-5):
-    for g in (32, 16, 8, 4, 2, 1):
-        if g <= max_groups and C % g == 0:
-            return nn.GroupNorm(g, C, eps=eps, affine=True)
-    return nn.GroupNorm(1, C, eps=eps, affine=True) 
-
-
 class ResBlock(nn.Module):
     def __init__(self,  *, in_ch, out_ch, temb_dim, dropout):
         super().__init__()
@@ -62,7 +52,7 @@ class ResBlock(nn.Module):
         self.temb_proj = nn.Linear(temb_dim, out_ch) 
         self.skip = nn.Identity() if in_ch == out_ch else nn.Conv2d(in_ch, out_ch, kernel_size=1)
         self.dropout = nn.Dropout(dropout)
-        self.act = nonlinearnity()
+        self.act = nonlinearity()
         
         # conv2 is zero initialized so the entire resnet block starts as identity out~x
         nn.init.zeros_(self.conv2.weight) 
@@ -74,7 +64,7 @@ class ResBlock(nn.Module):
         h = self.conv1(self.act(self.norm1(h))) # x -> GN -> SiLU -> Conv
         
         # temb.shape: B, temb_dim 
-        temb = self.temb_proj(temb)
+        temb = self.temb_proj(self.act(temb))
         temb = temb.reshape(B, self.out_ch, 1, 1)
         
         
@@ -140,7 +130,7 @@ class AttnBlock(nn.Module):
         
         
         pre_softmax = einsum(q, k, "b n c, b m c -> b n m")
-        pre_softmax = pre_softmax/(C**0.5)
+        pre_softmax = pre_softmax*(C**-0.5)
         sims = F.softmax(pre_softmax, dim=-1)
         attn_scores = einsum(sims, v, "b n m, b m c -> b n c")
         h_attn = attn_scores.reshape(B, H, W, C).permute(0,3,1,2)
@@ -152,8 +142,9 @@ class AttnBlock(nn.Module):
 # model
     
 class Unet(nn.Module):
-    def __init__(self, *, in_resolution, input_ch, ch, output_ch, num_res_blocks, temb_dim, attn_res, dropout = 0., resam_with_conv=True, ch_mult=[1,2,4,8]):
+    def __init__(self, *, in_resolution, input_ch, ch, output_ch, num_res_blocks, temb_dim, attn_res, dropout = 0., ch_mult=[1,2,4,8]):
         super().__init__()
+        self.act = nonlinearity()
         self.conv_in = nn.Conv2d( in_channels = input_ch, out_channels = ch, kernel_size = 3, stride = 1, padding = 1)
         self.temb_dim = temb_dim
         
@@ -210,53 +201,34 @@ class Unet(nn.Module):
         self.temb_l2 = nn.Linear(temb_dim*4, temb_dim)
         
         
+        
     
     def forward(self, x, t):
         temb = get_timestep_embedding(t, self.temb_dim)
-        temb = self.temb_l2(F.silu(self.temb_l1(temb)))
+        temb = self.temb_l2(self.act(self.temb_l1(temb)))
         
         
-        x = F.silu(self.conv_in(x))
+        x = self.conv_in(x)
         
         skips = []
         h = x
         for layer in self.contracting_path:
             
             if isinstance(layer,ResBlock):
-                h = layer(h,temb)
-                skips.append(h)
-            else: 
-                h = layer(h)
-            if isinstance(layer, AttnBlock):
+                h = layer(h,temb) 
+                skips.append(h)    
+            else:
+                h = layer(h)  
+            if isinstance(layer,AttnBlock):
                 skips[-1] = h
-        
-        for layer in self.middle:
-            if isinstance(layer,ResBlock):
-                h = layer(h,temb)
-            else: 
-                h = layer(h)
-        
-        for layer in self.expanding_path:
-            if isinstance(layer, ResBlock): 
-                h = torch.cat([h , skips.pop()],dim = 1)
-                h = layer(h,temb)
-            else: 
-                h = layer(h)
-        
-        return self.conv_out(F.silu(self.norm_out(h)))
             
         
+        for layer in self.middle:
+            h = layer(h,temb) if isinstance(layer,ResBlock) else layer(h) 
         
+        for layer in self.expanding_path:
+            if isinstance(layer,ResBlock):
+                h = torch.cat([h , skips.pop()],dim = 1)
+            h = layer(h,temb) if isinstance(layer,ResBlock) else layer(h) 
         
-        
-
-
-
-
-
-    
-
-
-        
-    
-    
+        return self.conv_out(self.act(self.norm_out(h)))
